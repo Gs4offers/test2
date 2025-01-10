@@ -1,0 +1,70 @@
+Sub ReadJsonFileIntoContact()
+    Dim jsonFilePath As String
+    Dim jsonContent As String
+    Dim contact As Contact
+    Dim fs As Object
+    Dim jsonFile As Object
+    Dim startPos As Integer, endPos As Integer
+    Dim coordsData As String
+    Dim coordValues() As String
+    Dim i As Integer, j As Integer
+    
+    ' Define the path to the JSON file
+    jsonFilePath = "C:\path\to\your\file\contact.json" ' Modify the path as needed
+    
+    ' Initialize FileSystemObject to read the file
+    Set fs = CreateObject("Scripting.FileSystemObject")
+    
+    ' Open the JSON file for reading
+    Set jsonFile = fs.OpenTextFile(jsonFilePath, 1)
+    
+    ' Read the entire content of the JSON file into a string
+    jsonContent = jsonFile.ReadAll
+    
+    ' Close the file
+    jsonFile.Close
+    
+    ' Now parse the JSON content into the Contact UDT
+    
+    ' Parse the name
+    startPos = InStr(jsonContent, """name"": """) + Len("""name"": """)
+    endPos = InStr(startPos, jsonContent, """")
+    contact.name = Mid(jsonContent, startPos, endPos - startPos)
+    
+    ' Parse the DoB (Date)
+    startPos = InStr(jsonContent, """DoB"": """) + Len("""DoB"": """)
+    endPos = InStr(startPos, jsonContent, """")
+    contact.DoB = CDate(Mid(jsonContent, startPos, endPos - startPos))
+    
+    ' Parse the Age
+    startPos = InStr(jsonContent, """Age"": ") + Len("""Age"": ")
+    endPos = InStr(startPos, jsonContent, ",")
+    contact.Age = CInt(Mid(jsonContent, startPos, endPos - startPos))
+    
+    ' Parse the Coords array
+    startPos = InStr(jsonContent, """Coords"": [") + Len("""Coords"": [")
+    endPos = InStr(startPos, jsonContent, "]")
+    coordsData = Mid(jsonContent, startPos, endPos - startPos)
+    
+    ' Split the coordsData into individual coordinates arrays
+    coordsData = Trim(coordsData)
+    coordsData = Replace(coordsData, "] [", "|")  ' Use "|" to separate each row
+    
+    ' Now loop through the coordinates and assign values
+    Dim coordsRows() As String
+    coordsRows = Split(coordsData, "|")
+    
+    For i = 0 To 1 ' 2 rows (0 to 1)
+        coordValues = Split(coordsRows(i), ",")
+        For j = 0 To 3 ' 4 columns (0 to 3)
+            contact.Coords(i, j) = CSng(coordValues(j))
+        Next j
+    Next i
+    
+    ' Output the Contact data (for testing purposes)
+    MsgBox "Contact Name: " & contact.name & vbCrLf & _
+           "DoB: " & contact.DoB & vbCrLf & _
+           "Age: " & contact.Age & vbCrLf & _
+           "Coords(0, 0): " & contact.Coords(0, 0) & vbCrLf & _
+           "Coords(1, 3): " & contact.Coords(1, 3)
+End Sub
