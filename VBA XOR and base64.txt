@@ -1,0 +1,166 @@
+Function DeriveKeyStream(ByVal key As String, ByVal length As Long) As String
+    Dim i As Long
+    Dim keyStream As String
+    Dim seed As Long
+    Dim rndValue As Long
+
+    ' Derive a simple seed from the key
+    For i = 1 To Len(key)
+        seed = seed + Asc(Mid(key, i, 1)) * i
+    Next i
+
+    Randomize seed
+    keyStream = ""
+
+    For i = 1 To length
+        rndValue = Int(Rnd() * 256)
+        keyStream = keyStream & Chr(rndValue)
+    Next i
+
+    DeriveKeyStream = keyStream
+End Function
+
+Function EnhancedXOREncryptDecrypt(ByVal inputText As String, ByVal key As String) As String
+    Dim outputText As String
+    Dim i As Long
+    Dim inputChar As String
+    Dim keyStream As String
+    Dim xorChar As String
+
+    keyStream = DeriveKeyStream(key, Len(inputText))
+    outputText = ""
+
+    For i = 1 To Len(inputText)
+        inputChar = Mid(inputText, i, 1)
+        xorChar = Chr(Asc(inputChar) Xor Asc(Mid(keyStream, i, 1)))
+        outputText = outputText & xorChar
+    Next i
+
+    EnhancedXOREncryptDecrypt = outputText
+End Function
+
+
+
+
+
+Sub TestEnhancedXOR()
+    Dim originalText As String
+    Dim key As String
+    Dim encrypted As String
+    Dim decrypted As String
+    
+    originalText = "Top Secret Message!"
+    key = "MySecureKey123"
+    
+    encrypted = EnhancedXOREncryptDecrypt(originalText, key)
+    MsgBox "Encrypted: " & encrypted
+    
+    decrypted = EnhancedXOREncryptDecrypt(encrypted, key)
+    MsgBox "Decrypted: " & decrypted
+End Sub
+
+
+
+
+
+Function Base64Encode(inputStr As String) As String
+    Dim arrData() As Byte
+    Dim objXML As Object
+    Dim objNode As Object
+
+    Set objXML = CreateObject("MSXML2.DOMDocument")
+    Set objNode = objXML.createElement("b64")
+
+    arrData = StrConv(inputStr, vbFromUnicode)
+    objNode.DataType = "bin.hex"
+    objNode.nodeTypedValue = arrData
+    objNode.DataType = "bin.base64"
+    Base64Encode = Replace(objNode.Text, vbLf, "") ' Remove newlines
+End Function
+
+Function Base64Decode(base64Str As String) As String
+    Dim objXML As Object
+    Dim objNode As Object
+    Dim arrData() As Byte
+
+    Set objXML = CreateObject("MSXML2.DOMDocument")
+    Set objNode = objXML.createElement("b64")
+
+    objNode.DataType = "bin.base64"
+    objNode.Text = base64Str
+    objNode.DataType = "bin.hex"
+    arrData = objNode.nodeTypedValue
+    Base64Decode = StrConv(arrData, vbUnicode)
+End Function
+
+
+
+
+Function DeriveKeyStream(ByVal key As String, ByVal length As Long) As String
+    Dim i As Long
+    Dim keyStream As String
+    Dim seed As Long
+    Dim rndValue As Long
+
+    For i = 1 To Len(key)
+        seed = seed + Asc(Mid(key, i, 1)) * i
+    Next i
+
+    Randomize seed
+    keyStream = ""
+
+    For i = 1 To length
+        rndValue = Int(Rnd() * 256)
+        keyStream = keyStream & Chr(rndValue)
+    Next i
+
+    DeriveKeyStream = keyStream
+End Function
+
+Function EnhancedXOREncrypt(ByVal inputText As String, ByVal key As String) As String
+    Dim i As Long, xorChar As String, outputText As String
+    Dim keyStream As String
+    keyStream = DeriveKeyStream(key, Len(inputText))
+
+    For i = 1 To Len(inputText)
+        xorChar = Chr(Asc(Mid(inputText, i, 1)) Xor Asc(Mid(keyStream, i, 1)))
+        outputText = outputText & xorChar
+    Next i
+
+    EnhancedXOREncrypt = Base64Encode(outputText)
+End Function
+
+Function EnhancedXORDecrypt(ByVal base64Input As String, ByVal key As String) As String
+    Dim i As Long, xorChar As String, outputText As String
+    Dim encryptedText As String
+    Dim keyStream As String
+
+    encryptedText = Base64Decode(base64Input)
+    keyStream = DeriveKeyStream(key, Len(encryptedText))
+
+    For i = 1 To Len(encryptedText)
+        xorChar = Chr(Asc(Mid(encryptedText, i, 1)) Xor Asc(Mid(keyStream, i, 1)))
+        outputText = outputText & xorChar
+    Next i
+
+    EnhancedXORDecrypt = outputText
+End Function
+
+
+
+
+Sub TestSecureXOREncryption()
+    Dim plainText As String
+    Dim key As String
+    Dim encryptedBase64 As String
+    Dim decryptedText As String
+
+    plainText = "Confidential Note 2025"
+    key = "MySecretKey!"
+
+    encryptedBase64 = EnhancedXOREncrypt(plainText, key)
+    MsgBox "Encrypted (Base64): " & encryptedBase64
+
+    decryptedText = EnhancedXORDecrypt(encryptedBase64, key)
+    MsgBox "Decrypted: " & decryptedText
+End Sub
