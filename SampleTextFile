@@ -1,1 +1,256 @@
-txt file
+#==========================================================================
+#  Parallel File-Copy Engine – PowerShell 5.1
+#  Author:  @GS56130909   (refactored by Grok)
+#  Date:    2025-11-10
+#==========================================================================
+
+# -------------------------- 1. Configuration --------------------------
+class Config {
+    [int]    $MaxParallel          = [Environment]::ProcessorCount * 2   # I/O bound → 2× cores
+    [string] $InputFolder          = 'C:\Input'
+    [string] $SourceRoot           = 'C:\Source'
+    [string] $DestRoot             = 'C:\Destination'
+    [string] $LogFolder            = 'C:\Logs'
+    [bool]   $Overwrite            = $false
+    [bool]   $OnlyVerify           = $false
+    [int]    $StartLine            = 1
+    [int]    $LinesToProcess       = -1          # -1 = whole file
+    [string[]]$InputFiles          = @('Documents (81).txt')
+}
+
+# -------------------------- 2. Helper Functions ------------------------
+function New-LogPath ([string]$base, [string]$accountId, [string]$accountName, [int]$start) {
+    $ts = Get-Date -Format "yyyyMMdd_HHmmss"
+    "$base\Session_$ts.txt", "$base\Script_$accountName-$accountId-$start.txt", "$base\Extract_$accountName-$accountId-$start.txt"
+}
+
+function Get-AccountInfo ([string[]]$line) {
+    $id   = $line[0].Trim('"')
+    $name = $line[1].Trim('"') -replace '[\<\>\:"/\\\|\?\*~]','_'
+    return $id, $name
+}
+
+function Resolve-Paths ([string]$srcFull, [string]$srcRoot, [string]$dstRoot) {
+    $srcNoQuote = $srcFull.Trim('"')
+    $dstFull    = $srcNoQuote -replace ([regex]::Escape($srcRoot)), $dstRoot
+    if ($dstFull -eq $srcNoQuote) { return $null,$null }   # not a valid replace
+    return $srcNoQuote, $dstFull
+}
+
+# -------------------------- 3. Task object ---------------------------
+class CopyTask {
+    [int]      $TaskId
+    [int]      $Line
+    [string]   $DocId
+    [string]   $Source
+    [string]   $Dest
+    [hashtable]$Result = @{}
+
+    hidden [System.Management.Automation.PowerShell]$Ps
+    hidden [IAsyncResult]$Handle
+    hidden [System.Threading.WaitHandle]$Wait
+
+    CopyTask([int]$id, [int]$ln, [string]$doc, [string]$src, [string]$dst, [powershell]$ps) {
+        $this.TaskId = $id
+        $this.Line   = $ln
+        $this.DocId  = $doc
+        $this.Source = $src
+        $this.Dest   = $dst
+        $this.Ps     = $ps
+        $this.Handle = $ps.BeginInvoke()
+        $this.Wait   = $this.Handle.AsyncWaitHandle
+    }
+
+    [bool] IsReady()  { return $this.Wait.WaitOne(0) }
+    [hashtable] Collect() {
+        $this.Result = $this.Ps.EndInvoke($this.Handle)
+        $this.Ps.Dispose()
+        return $this.Result
+    }
+}
+
+# -------------------------- 4. Processing scriptblock (Robocopy) -----
+$script:CopyScript = {
+    param($src,$dst,$docId,$line,$overwrite)
+
+    $log = "Fileline#: $line : Task: $line : DocID: $docId"
+
+    if (-not (Test-Path $src)) {
+        return @{Copied=0; Missing=1; Exists=0; Failed=0; Log="$log : SourceMissing: $src"}
+    }
+
+    $dir = Split-Path $dst -Parent
+    if (-not (Test-Path $dir)) { $null = New-Item -ItemType Directory -Path $dir -Force }
+
+    # Robocopy is *much* faster than Copy-Item
+    $args = @(
+        "`"$([IO.Path]::GetDirectoryName($src))`"",
+        "`"$dir`"",
+        "`"$([IO.Path]::GetFileName($src))`"",
+        '/COPY:DAT','/R:1','/W:1','/NP'
+    )
+    if ($overwrite) { $args += '/IS' }
+
+    $rc = robocopy @args
+    $exit = $LASTEXITCODE
+
+    if ($exit -le 1) {
+        return @{Copied=1; Missing=0; Exists=0; Failed=0; Log="$log : Copied: $dst"}
+    } elseif (Test-Path $dst) {
+        return @{Copied=0; Missing=0; Exists=1; Failed=0; Log="$log : DestAlreadyExists: $dst"}
+    } else {
+        return @{Copied=0; Missing=0; Exists=0; Failed=1; Log="$log : CopyFailed: $src → $dst"}
+    }
+}
+
+# -------------------------- 5. Worker pool ---------------------------
+class WorkerPool {
+    hidden [System.Management.Automation.Runspaces.RunspacePool]$Pool
+    hidden [System.Collections.Concurrent.ConcurrentBag[CopyTask]]$Bag
+    hidden [hashtable]$Sync = [hashtable]::Synchronized(@{Done=$false})
+
+    WorkerPool([int]$max) {
+        $this.Pool = [runspacefactory]::CreateRunspacePool(1,$max)
+        $this.Pool.Open()
+        $this.Bag  = [System.Collections.Concurrent.ConcurrentBag[CopyTask]]::new()
+    }
+
+    [void] Submit([int]$id,[int]$ln,[string]$doc,[string]$src,[string]$dst) {
+        $ps = [powershell]::Create().AddScript($script:CopyScript)
+        $ps.RunspacePool = $this.Pool
+        $ps.AddArgument($src).AddArgument($dst).AddArgument($doc).AddArgument($ln).AddArgument($false) | Out-Null
+        $task = [CopyTask]::new($id,$ln,$doc,$src,$dst,$ps)
+        $this.Bag.Add($task)
+    }
+
+    [bool] TryTake([ref]$task) { return $this.Bag.TryTake([ref]$task) }
+    [void] AddBack([CopyTask]$t) { $this.Bag.Add($t) }
+    [void] SignalDone() { $this.Sync.Done = $true }
+    [bool] IsDone()     { return $this.Sync.Done }
+    [int]  Count()      { return $this.Bag.Count }
+    [void] Close() {
+        $this.Pool.Close()
+        $this.Pool.Dispose()
+    }
+}
+
+# -------------------------- 6. Disposer (zero-CPU) -------------------
+function Start-Disposer ([WorkerPool]$pool, [System.Collections.Concurrent.ConcurrentQueue[string]]$logQ, [hashtable]$sync) {
+    $ps = [powershell]::Create()
+    $ps.RunspacePool = [runspacefactory]::CreateRunspacePool(1,1); $ps.RunspacePool.Open()
+    $ps.AddScript({
+        param($p,$q,$s)
+        while (-not $s.Done -or $p.Count -gt 0) {
+            $task = $null
+            if ($p.TryTake([ref]$task)) {
+                if ($task.IsReady()) {
+                    $r = $task.Collect()
+                    $q.Enqueue("$(Get-Date -Format FileDateTime) : Task $($task.TaskId) Doc $($task.DocId) : $($r.Log)")
+                    # counters can be sent via another queue if needed
+                } else {
+                    $p.AddBack($task)
+                    Start-Sleep -Milliseconds 20
+                }
+            } else { Start-Sleep -Milliseconds 50 }
+        }
+    }).AddArgument($pool).AddArgument($logQ).AddArgument($sync) | Out-Null
+    $handle = $ps.BeginInvoke()
+    return $ps,$handle
+}
+
+# -------------------------- 7. Logger -------------------------------
+function Start-Logger ([System.Collections.Concurrent.ConcurrentQueue[string]]$q, [string]$path, [hashtable]$sync) {
+    $ps = [powershell]::Create()
+    $ps.RunspacePool = [runspacefactory]::CreateRunspacePool(1,1); $ps.RunspacePool.Open()
+    $ps.AddScript({
+        param($queue,$file,$s)
+        while (-not $s.Done -or $queue.Count -gt 0) {
+            $msg = $null
+            if ($queue.TryDequeue([ref]$msg)) { $msg | Out-File -FilePath $file -Append }
+            else { Start-Sleep -Milliseconds 30 }
+        }
+    }).AddArgument($q).AddArgument($path).AddArgument($sync) | Out-Null
+    $handle = $ps.BeginInvoke()
+    return $ps,$handle
+}
+
+# -------------------------- 8. MAIN -------------------------------
+$config = [Config]::new()
+$sessionLog, $scriptLog, $extractLog = New-LogPath $config.LogFolder 'SESSION' 'GLOBAL' 0
+"START $(Get-Date)" | Out-File $sessionLog
+
+$pool   = [WorkerPool]::new($config.MaxParallel)
+$logQ   = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+$sync   = [hashtable]::Synchronized(@{Done=$false})
+
+$dispPs,$dispH = Start-Disposer $pool $logQ $sync
+$logPs,$logH   = Start-Logger  $logQ $extractLog $sync
+
+$seenDoc = @{}                     # deduplication per account
+$globalStats = @{Copied=0;Missing=0;Exists=0;Failed=0;Skipped=0;Long=0}
+
+foreach ($fileName in $config.InputFiles) {
+    $path = Join-Path $config.InputFolder $fileName
+    $lines = Get-Content $path
+    $linesToDo = if ($config.LinesToProcess -eq -1) { $lines.Count } else { [math]::Min($config.LinesToProcess,$lines.Count) }
+    $startIdx  = [math]::Max(0, $config.StartLine-1)
+
+    $acctId,$acctName = Get-AccountInfo ($lines[1] -split '\|')
+    $srcRoot = "$($config.SourceRoot)\$acctId"
+    $dstRoot = "$($config.DestRoot)\$acctId"
+
+    $acctLog = "$($config.LogFolder)\Script_$acctName-$acctId-$startIdx.txt"
+    "Processing $fileName – Account $acctName ($acctId)" | Out-File $acctLog
+
+    $seenDoc.Clear()
+    $acctStats = @{Copied=0;Missing=0;Exists=0;Failed=0;Skipped=0;Long=0}
+
+    for ($i=$startIdx; $i -lt $linesToDo; $i++) {
+        $parts = $lines[$i] -split '\|'
+        if ($parts[0].Trim('"') -eq 'accountid') { continue }   # header
+
+        $srcFull = $parts[8]
+        if (-not $srcFull.ToLower().Contains('assigned')) { $acctStats.Skipped++; continue }
+
+        $src,$dst = Resolve-Paths $srcFull $srcRoot $dstRoot
+        if (-not $src) { $acctStats.Skipped++; continue }
+
+        $doc = $parts[10].Trim('"')
+        if ($seenDoc.ContainsKey($doc)) { $acctStats.Exists++; continue }
+        $seenDoc[$doc] = $true
+
+        if ($src.Length -gt 259) { $acctStats.Long++; continue }
+
+        # ---- submit ----
+        $taskId = $i+1
+        $pool.Submit($taskId,$taskId,$doc,$src,$dst)
+
+        # keep pool from exploding
+        while ($pool.Count() -ge $config.MaxParallel) {
+            Start-Sleep -Milliseconds 50
+        }
+    }
+
+    # ---- drain ----
+    $pool.SignalDone()
+    $sync.Done = $true
+    $null = $dispPs.EndInvoke($dispH); $dispPs.Dispose()
+    $null = $logPs.EndInvoke($logH);   $logPs.Dispose()
+
+    # ---- report ----
+    $total = $acctStats.Copied + $acctStats.Missing + $acctStats.Exists + $acctStats.Failed
+    $msg = "Account $acctName : Lines $linesToDo : Copied $($acctStats.Copied) : Missing $($acctStats.Missing) : Exists $($acctStats.Exists) : Failed $($acctStats.Failed) : Skipped $($acctStats.Skipped) : Long $($acctStats.Long)"
+    $msg | Out-File $acctLog -Append
+    $msg | Out-File $sessionLog -Append
+
+    # accumulate session totals
+    foreach ($k in $acctStats.Keys) { $globalStats[$k] += $acctStats[$k] }
+}
+
+# final session totals
+$final = "SESSION TOTALS : Copied $($globalStats.Copied) Missing $($globalStats.Missing) Exists $($globalStats.Exists) Failed $($globalStats.Failed) Skipped $($globalStats.Skipped) Long $($globalStats.Long)"
+$final | Out-File $sessionLog -Append
+Write-Host $final
+
+$pool.Close()
+"END $(Get-Date)" | Out-File $sessionLog -Append
