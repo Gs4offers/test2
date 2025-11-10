@@ -174,8 +174,7 @@ function Start-Logger ([System.Collections.Concurrent.ConcurrentQueue[string]]$q
     return $ps,$handle
 }
 
-# -------------------------- 8. MAIN -------------------------------
-$config = [Config]::new()
+# -------------------------- 8. MAIN (WITH PROGRESS) -----------------
 $sessionLog, $scriptLog, $extractLog = New-LogPath $config.LogFolder 'SESSION' 'GLOBAL' 0
 "START $(Get-Date)" | Out-File $sessionLog
 
@@ -186,8 +185,19 @@ $sync   = [hashtable]::Synchronized(@{Done=$false})
 $dispPs,$dispH = Start-Disposer $pool $logQ $sync
 $logPs,$logH   = Start-Logger  $logQ $extractLog $sync
 
-$seenDoc = @{}                     # deduplication per account
+$seenDoc = @{}
 $globalStats = @{Copied=0;Missing=0;Exists=0;Failed=0;Skipped=0;Long=0}
+
+# === PRE-COUNT TOTAL LINES TO PROCESS ===
+$totalLines = 0
+foreach ($fileName in $config.InputFiles) {
+    $path = Join-Path $config.InputFolder $fileName
+    $lines = Get-Content $path
+    $linesToDo = if ($config.LinesToProcess -eq -1) { $lines.Count } else { [math]::Min($config.LinesToProcess,$lines.Count) }
+    $startIdx  = [math]::Max(0, $config.StartLine-1)
+    $totalLines += ($linesToDo - $startIdx)
+}
+$progress = [ProgressTracker]::new($totalLines, $logQ)
 
 foreach ($fileName in $config.InputFiles) {
     $path = Join-Path $config.InputFolder $fileName
@@ -200,14 +210,14 @@ foreach ($fileName in $config.InputFiles) {
     $dstRoot = "$($config.DestRoot)\$acctId"
 
     $acctLog = "$($config.LogFolder)\Script_$acctName-$acctId-$startIdx.txt"
-    "Processing $fileName – Account $acctName ($acctId)" | Out-File $acctLog
+    "Processing $fileName – Account $acctName ($acctId)" | Out-File $acctLog -Append
 
     $seenDoc.Clear()
     $acctStats = @{Copied=0;Missing=0;Exists=0;Failed=0;Skipped=0;Long=0}
 
     for ($i=$startIdx; $i -lt $linesToDo; $i++) {
         $parts = $lines[$i] -split '\|'
-        if ($parts[0].Trim('"') -eq 'accountid') { continue }   # header
+        if ($parts[0].Trim('"') -eq 'accountid') { continue }
 
         $srcFull = $parts[8]
         if (-not $srcFull.ToLower().Contains('assigned')) { $acctStats.Skipped++; continue }
@@ -221,36 +231,89 @@ foreach ($fileName in $config.InputFiles) {
 
         if ($src.Length -gt 259) { $acctStats.Long++; continue }
 
-        # ---- submit ----
         $taskId = $i+1
         $pool.Submit($taskId,$taskId,$doc,$src,$dst)
 
-        # keep pool from exploding
+        # Update progress every 50 submissions
+        if ($taskId % 50 -eq 0) {
+            $progress.Update($fileName, $globalStats)
+        }
+
         while ($pool.Count() -ge $config.MaxParallel) {
-            Start-Sleep -Milliseconds 50
+            Start-Sleep -Milliseconds 10
         }
     }
 
-    # ---- drain ----
-    $pool.SignalDone()
-    $sync.Done = $true
-    $null = $dispPs.EndInvoke($dispH); $dispPs.Dispose()
-    $null = $logPs.EndInvoke($logH);   $logPs.Dispose()
-
-    # ---- report ----
-    $total = $acctStats.Copied + $acctStats.Missing + $acctStats.Exists + $acctStats.Failed
-    $msg = "Account $acctName : Lines $linesToDo : Copied $($acctStats.Copied) : Missing $($acctStats.Missing) : Exists $($acctStats.Exists) : Failed $($acctStats.Failed) : Skipped $($acctStats.Skipped) : Long $($acctStats.Long)"
-    $msg | Out-File $acctLog -Append
-    $msg | Out-File $sessionLog -Append
-
-    # accumulate session totals
-    foreach ($k in $acctStats.Keys) { $globalStats[$k] += $acctStats[$k] }
+    # Final update before draining
+    $progress.Update($fileName, $globalStats)
 }
 
-# final session totals
+# === DRAIN & FINALIZE ===
+$pool.SignalDone()
+$sync.Done = $true
+$null = $dispPs.EndInvoke($dispH); $dispPs.Dispose()
+$null = $logPs.EndInvoke($logH);   $logPs.Dispose()
+
+$progress.Stop()
+
+# Parse extract log for final counts
+$logLines = Get-Content $extractLog
+$finalStats = @{Copied=0;Missing=0;Exists=0;Failed=0}
+foreach ($line in $logLines) {
+    if ($line -match 'Copied') { $finalStats.Copied++ }
+    elseif ($line -match 'SourceMissing') { $finalStats.Missing++ }
+    elseif ($line -match 'DestAlreadyExists') { $finalStats.Exists++ }
+    elseif ($line -match 'CopyFailed') { $finalStats.Failed++ }
+}
+
+# === UPDATE GLOBAL STATS FROM LOG QUEUE (or use shared counters) ===
+# Optional: parse $extractLog to get final counts if needed
+
 $final = "SESSION TOTALS : Copied $($globalStats.Copied) Missing $($globalStats.Missing) Exists $($globalStats.Exists) Failed $($globalStats.Failed) Skipped $($globalStats.Skipped) Long $($globalStats.Long)"
 $final | Out-File $sessionLog -Append
 Write-Host $final
 
 $pool.Close()
 "END $(Get-Date)" | Out-File $sessionLog -Append
+
+
+
+# -------------------------- 9. PROGRESS BAR (PS 5.1) -----------------
+class ProgressTracker {
+    [int]      $Total = 0
+    [int]      $Copied = 0
+    [int]      $Missing = 0
+    [int]      $Exists = 0
+    [int]      $Failed = 0
+    [string]   $CurrentFile = ""
+    [System.Threading.Timer] $Timer
+
+    ProgressTracker([int]$total, [System.Collections.Concurrent.ConcurrentQueue[string]]$logQ) {
+        $this.Total = $total
+        $this.Timer = [System.Threading.Timer]::new(
+            { param($state)
+                $p = $state
+                $percent = if ($p.Total -gt 0) { [math]::Round(($p.Copied * 100) / $p.Total, 1) } else { 0 }
+                $bar = '=' * [int]($percent / 2) + ' ' * (50 - [int]($percent / 2))
+                $line = "$($p.CurrentFile.PadRight(30).Substring(0,[math]::Min(30,$p.CurrentFile.Length))) | [$bar] $percent% | Copied: $($p.Copied)/$($p.Total) | M:$($p.Missing) E:$($p.Exists) F:$($p.Failed)"
+                Write-Host "`r$line" -NoNewline
+            },
+            $this,
+            [TimeSpan]::FromMilliseconds(100),
+            [TimeSpan]::FromMilliseconds(100)
+        )
+    }
+
+    [void] Update([string]$file, [hashtable]$stats) {
+        $this.CurrentFile = [IO.Path]::GetFileName($file)
+        $this.Copied  = $stats.Copied
+        $this.Missing = $stats.Missing
+        $this.Exists  = $stats.Exists
+        $this.Failed  = $stats.Failed
+    }
+
+    [void] Stop() {
+        $this.Timer.Dispose()
+        Write-Host "`nProgress complete."
+    }
+}
