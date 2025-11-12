@@ -7,10 +7,10 @@ $maxNumberOfParallelJobs = 3 * [Environment]::ProcessorCount # I/O bound → 2×
 $onlyVerifyDestinationFile = $false
 $overwriteIfDestinationExists = $false
 
-$inputFilesFolder = "C:\Users\B296SD\OneDrive - AXA\Projects\Health\Sapphire\InputFiles\28Oct2025"
-$sourceRootFolder = "\\nscnvf11.axa-icas.net\axisdocs\assigned"
-$destinationRootFolder = "\\nscnvf11.axa-icas.net\Archive\Docs_20Oct2025"
-$scriptLogFileFolder = "C:\temp\ScriptLogsVerifyRunInputOf28Oct2025"
+$inputFilesFolder = "gfgssdsd"
+$sourceRootFolder = "\gfdsdfgsdd"
+$destinationRootFolder = "grrgdfsgds"
+$scriptLogFileFolder = "fkjsdfkjsdhk"
 
 $startAtFileLine = 1
 $numOfFileLinesToProcess = -1 # -1 = whole file
