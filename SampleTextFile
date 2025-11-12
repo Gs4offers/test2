@@ -541,3 +541,4 @@ finally {
     
     "Cleanup complete – $(Get-Date)" | Out-File $sessionLogFileFullPath -Append
 }
+
