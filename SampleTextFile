@@ -1,29 +1,23 @@
 <#=====================================================================
- Parallel File-Copy Engine – PowerShell 5.1
+ Parallel File-Copy Engine – PowerShell 5.1 - FINAL CLEAN VERSION
 =====================================================================#>
 
 # -------------------------- 1. CONFIGURATION --------------------------
-$maxNumberOfParallelJobs = 3 * [Environment]::ProcessorCount # I/O bound → 2× cores is usually best
+$maxNumberOfParallelJobs = 3 * [Environment]::ProcessorCount
 $onlyVerifyDestinationFile = $false
 $overwriteIfDestinationExists = $false
 
-$inputFilesFolder = "gfgssdsd"
-$sourceRootFolder = "\gfdsdfgsdd"
-$destinationRootFolder = "grrgdfsgds"
-$scriptLogFileFolder = "fkjsdfkjsdhk"
+$inputFilesFolder = "C:\path\to\input"
+$sourceRootFolder = "\\server\source"
+$destinationRootFolder = "\\server\destination"
+$scriptLogFileFolder = "C:\path\to\logs"
 
 $startAtFileLine = 1
 $numOfFileLinesToProcess = -1 # -1 = whole file
 
 $listOfInputFiles = @(
-    'Documents (81).txt'
-    ,
+    'Documents (81).txt',
     'Documents (58).txt'
-    #,
-    #'Documents (46).txt'
-    #,
-    #'Documents (117).txt'
-    # add more files here if needed
 )
 
 # -------------------------- 2. HELPER FUNCTIONS ----------------------
@@ -49,314 +43,181 @@ function Get-AccountInfo ([string[]]$line) {
     return $id, $name
 }
 
-##function Resolve-Paths ([string]$srcFull, [string]$srcRoot, [string]$dstRoot, [string]$docID) {
-##    $src = $srcFull.Trim('"')
-##    $dst = $src -replace ([regex]::Escape($srcRoot)), $dstRoot
-##    if ($dst -eq $src) { return $null, $null }
-##    return $src, $dst
-##}
-
-function Get-PooledPowershellInstance {
-    param([System.Collections.Concurrent.ConcurrentBag[powershell]] $psPool)
-
-	$ps = $Null
-	$null = $psPool.TryTake([ref]$ps)
-	$ps.Commands.Clear()
-	return $ps
-}
-
 # -------------------------- 3. PROCESSING SCRIPTBLOCK ----------------
 
-$scriptBlockForProcessingThread = {
+$processingScriptBlock = {
     param(
         $taskID,
         $fileLineNum,
         $docLinkIDWithoutQuotes,
-		$sourceRootFolder,
-		$destinationRootFolder,
+        $sourceRootFolder,
+        $destinationRootFolder,
         $sourceFileFullPath,
         $onlyVerifyDestinationFile,
         $overwriteIfDestinationExists
     )
 
-    $fileCopied = 0; $sourceFileMissing = 0; $destAlreadyExists = 0; $copyFailed = 0
+    $fileCopied = 0
+    $sourceFileMissing = 0
+    $destAlreadyExists = 0
+    $copyFailed = 0
     $logString = ""
-	
-	$sourcePath = .substring(0, $sourceFileFullPath.LastIndexOf('\'))
+    
+    try {
+        # Parse source file info
+        $sourceFileName = [System.IO.Path]::GetFileName($sourceFileFullPath)
+        $fileExtension = [System.IO.Path]::GetExtension($sourceFileFullPath)
 
-	$sourceFileName = $sourceFileFullPath.substring($sourceFileFullPath.LastIndexOf('\')+1)
+        # Build destination path
+        $destinationFileFullPath = $sourceFileFullPath -replace ([regex]::Escape($sourceRootFolder)), $destinationRootFolder
+        $destinationFolderPath = [System.IO.Path]::GetDirectoryName($destinationFileFullPath)
+        $destinationFileFullPath = [System.IO.Path]::Combine($destinationFolderPath, "$docLinkIDWithoutQuotes$fileExtension")
 
-	if($sourceFileName.LastIndexOf('.') -ge 0) {
-
-		$fileExtension = $sourceFileName.Substring($sourceFileName.LastIndexOf('.'))
-	}
-	else {
-
-		$fileExtension = ''
-	}
-
-	$destinationFileFullPath = $sourceFileFullPath -replace ([regex]::Escape($sourceRootFolder)), $destinationRootFolder
-	
-	$destinationFolderPath = $destinationFileFullPath.substring(0, $destinationFileFullPath.LastIndexOf('\'))
-
-	$destinationFileFullPath = "$destinationFolderPath\$docLinkIDWithoutQuotes$fileExtension"
-
-    # ---- valid destination? ----
-    if ($destinationFileFullPath -eq $sourceFileFullPath) {
-        $copyFailed = 1
-        $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : InvalidDestinationPath: $destinationFileFullPath"
-        return @{
-            TaskID = $taskID; DocID = $docLinkIDWithoutQuotes; SourceFileFullPath = $sourceFileFullPath
-            DestinationFileFullPath = $destinationFileFullPath; FileCopied = $fileCopied
-            SourceFileMissing = $sourceFileMissing; DestAlreadyExists = $destAlreadyExists; CopyFailed = $copyFailed
-            LogString = "$(get-date -format "ddMMyyyy_HHmmss.ffff") : $($logString)"
-        }
-    }
-	
-    # ---- source exists? ----
-    if ((!(Test-Path -LiteralPath $sourceFileFullPath)) -and (!(Test-Path -Path $sourceFileFullPath))) {
-        $sourceFileMissing = 1
-        $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : SourceFileMissing: $sourceFileFullPath"
-        return @{
-            TaskID = $taskID; DocID = $docLinkIDWithoutQuotes; SourceFileFullPath = $sourceFileFullPath
-            DestinationFileFullPath = $destinationFileFullPath; FileCopied = $fileCopied
-            SourceFileMissing = $sourceFileMissing; DestAlreadyExists = $destAlreadyExists; CopyFailed = $copyFailed
-            LogString = "$(get-date -format "ddMMyyyy_HHmmss.ffff") : $($logString)"
-        }
-    }
-
-    # ---- create destination folder ----
-    $destDir = [IO.Path]::GetDirectoryName($destinationFileFullPath)
-    if (-not (Test-Path -LiteralPath $destDir)) {
-        try {
-            [IO.Directory]::CreateDirectory($destDir) | Out-Null
-        } catch {
+        # Validate destination is different from source
+        if ($destinationFileFullPath -eq $sourceFileFullPath) {
             $copyFailed = 1
-            $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : CreateDirFailed: $destDir"
+            $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : InvalidDestinationPath: $destinationFileFullPath"
             return @{
-                TaskID = $taskID; DocID = $docLinkIDWithoutQuotes; SourceFileFullPath = $sourceFileFullPath
-                DestinationFileFullPath = $destinationFileFullPath; FileCopied = $fileCopied
-                SourceFileMissing = $sourceFileMissing; DestAlreadyExists = $destAlreadyExists; CopyFailed = $copyFailed
-                LogString = "$(get-date -format "ddMMyyyy_HHmmss.ffff") : $($logString)"
+                FileCopied = $fileCopied
+                SourceFileMissing = $sourceFileMissing
+                DestAlreadyExists = $destAlreadyExists
+                CopyFailed = $copyFailed
+                LogString = "$(Get-Date -Format 'ddMMyyyy_HHmmss.ffff') : $logString"
             }
         }
-    }
+        
+        # Check if source exists
+        if (-not [System.IO.File]::Exists($sourceFileFullPath)) {
+            $sourceFileMissing = 1
+            $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : SourceFileMissing: $sourceFileFullPath"
+            return @{
+                FileCopied = $fileCopied
+                SourceFileMissing = $sourceFileMissing
+                DestAlreadyExists = $destAlreadyExists
+                CopyFailed = $copyFailed
+                LogString = "$(Get-Date -Format 'ddMMyyyy_HHmmss.ffff') : $logString"
+            }
+        }
 
-    # ---- verify-only mode ----
-    if ($onlyVerifyDestinationFile) {
-        if (Test-Path -LiteralPath $destinationFileFullPath) {
+        # Create destination directory if needed
+        if (-not [System.IO.Directory]::Exists($destinationFolderPath)) {
+            try {
+                [System.IO.Directory]::CreateDirectory($destinationFolderPath) | Out-Null
+            }
+            catch {
+                $copyFailed = 1
+                $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : CreateDirFailed: $destinationFolderPath : $($_.Exception.Message)"
+                return @{
+                    FileCopied = $fileCopied
+                    SourceFileMissing = $sourceFileMissing
+                    DestAlreadyExists = $destAlreadyExists
+                    CopyFailed = $copyFailed
+                    LogString = "$(Get-Date -Format 'ddMMyyyy_HHmmss.ffff') : $logString"
+                }
+            }
+        }
+
+        # Verify-only mode
+        if ($onlyVerifyDestinationFile) {
+            if ([System.IO.File]::Exists($destinationFileFullPath)) {
+                $destAlreadyExists = 1
+                $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : DestAlreadyExists: $destinationFileFullPath"
+            }
+            else {
+                $copyFailed = 1
+                $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : DestNotFound: $destinationFileFullPath"
+            }
+            return @{
+                FileCopied = $fileCopied
+                SourceFileMissing = $sourceFileMissing
+                DestAlreadyExists = $destAlreadyExists
+                CopyFailed = $copyFailed
+                LogString = "$(Get-Date -Format 'ddMMyyyy_HHmmss.ffff') : $logString"
+            }
+        }
+
+        # Check if destination already exists
+        $destExists = [System.IO.File]::Exists($destinationFileFullPath)
+        if ($destExists -and -not $overwriteIfDestinationExists) {
             $destAlreadyExists = 1
             $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : DestAlreadyExists: $destinationFileFullPath"
-        } else {
+            return @{
+                FileCopied = $fileCopied
+                SourceFileMissing = $sourceFileMissing
+                DestAlreadyExists = $destAlreadyExists
+                CopyFailed = $copyFailed
+                LogString = "$(Get-Date -Format 'ddMMyyyy_HHmmss.ffff') : $logString"
+            }
+        }
+
+        # Perform the copy
+        try {
+            [System.IO.File]::Copy($sourceFileFullPath, $destinationFileFullPath, $true)
+            $fileCopied = 1
+            $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : Copied: $destinationFileFullPath"
+        }
+        catch {
             $copyFailed = 1
-            $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : CopyFailed: $sourceFileFullPath : IntendedDestination : $destinationFileFullPath" 
-        }
-        return @{
-            TaskID = $taskID; DocID = $docLinkIDWithoutQuotes; SourceFileFullPath = $sourceFileFullPath
-            DestinationFileFullPath = $destinationFileFullPath; FileCopied = $fileCopied
-            SourceFileMissing = $sourceFileMissing; DestAlreadyExists = $destAlreadyExists; CopyFailed = $copyFailed
-            LogString = "$(get-date -format "ddMMyyyy_HHmmss.ffff") : $($logString)"
+            $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : CopyFailed: $sourceFileFullPath : Destination: $destinationFileFullPath : $($_.Exception.Message)"
         }
     }
-
-    # ---- overwrite logic ----
-    $destExists = Test-Path -LiteralPath $destinationFileFullPath
-    if ($destExists -and -not $overwriteIfDestinationExists) {
-        $destAlreadyExists = 1
-        $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : DestAlreadyExists: $destinationFileFullPath"
-        return @{
-            TaskID = $taskID; DocID = $docLinkIDWithoutQuotes; SourceFileFullPath = $sourceFileFullPath
-            DestinationFileFullPath = $destinationFileFullPath; FileCopied = $fileCopied
-            SourceFileMissing = $sourceFileMissing; DestAlreadyExists = $destAlreadyExists; CopyFailed = $copyFailed
-            LogString = "$(get-date -format "ddMMyyyy_HHmmss.ffff") : $($logString)"
-        }
-    }
-
-    # ---- COPY (rename) ----
-    try {
-        [IO.File]::Copy($sourceFileFullPath, $destinationFileFullPath, $true) # $true = overwrite
-        $fileCopied = 1
-        $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : Copied: $destinationFileFullPath"
-    } catch {
+    catch {
         $copyFailed = 1
-        $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : CopyFailed: $sourceFileFullPath : IntendedDestination : $destinationFileFullPath : $($_.Exception.Message)"
+        $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : UnexpectedError: $($_.Exception.Message)"
     }
 
     return @{
-        TaskID = $taskID; DocID = $docLinkIDWithoutQuotes; SourceFileFullPath = $sourceFileFullPath
-        DestinationFileFullPath = $destinationFileFullPath; FileCopied = $fileCopied
-        SourceFileMissing = $sourceFileMissing; DestAlreadyExists = $destAlreadyExists; CopyFailed = $copyFailed
-        LogString = "$(get-date -format "ddMMyyyy_HHmmss.ffff") : $($logString)"
+        FileCopied = $fileCopied
+        SourceFileMissing = $sourceFileMissing
+        DestAlreadyExists = $destAlreadyExists
+        CopyFailed = $copyFailed
+        LogString = "$(Get-Date -Format 'ddMMyyyy_HHmmss.ffff') : $logString"
     }
 }
-$processingThreadScriptBlockPrecompiled = [scriptblock]::Create($scriptBlockForProcessingThread.ToString())
 
-# -------------------------- 4. TASK OBJECT ---------------------------
-
-#class CopyTask {
-#    [int] $TaskID
-#    [int] $FileLineNum
-#    [string] $DocID
-#    [string] $SourceFileFullPath
-#    [string] $DestinationFileFullPath
-#    hidden [System.Management.Automation.PowerShell] $Ps
-#    hidden [IAsyncResult] $Handle
-#    hidden [System.Threading.WaitHandle] $Wait
-#
-#    CopyTask($id, $ln, $doc, $src, $dst, $ps) {
-#        $this.TaskID = $id
-#        $this.FileLineNum = $ln
-#        $this.DocID = $doc
-#        $this.SourceFileFullPath = $src
-#        $this.DestinationFileFullPath = $dst
-#        $this.Ps = $ps
-#        $this.Handle = $ps.BeginInvoke()
-#        $this.Wait = $this.Handle.AsyncWaitHandle
-#    }
-#
-#    [bool] IsReady() { return $this.Wait.WaitOne(0) }
-#    [hashtable] Collect() {
-#        $result = $this.Ps.EndInvoke($this.Handle)
-#        $this.Ps.Dispose()
-#        return $result
-#    }
-#}
-
-# -------------------------- 5. WORKER POOL ---------------------------
-$sharedBag = [System.Collections.Concurrent.ConcurrentBag[hashtable]]::new()
-$logQueue = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
-
-$syncObjProcessorToDisposer = [hashtable]::Synchronized(@{ Done = $false })
-$syncObjDisposerToLogger = [hashtable]::Synchronized(@{ Done = $false })
-
-$throttleSemaphore = [System.Threading.SemaphoreSlim]::new($maxNumberOfParallelJobs, $maxNumberOfParallelJobs)
-
-
-$processorRunspacePool = [runspacefactory]::CreateRunspacePool(1, $maxNumberOfParallelJobs)
-$processorRunspacePool.Open()
-
-$powershellPoolForProcessor = [System.Collections.Concurrent.ConcurrentBag[powershell]]::new()
-$maxPowershellInstances = $maxNumberOfParallelJobs * 2 #a bit more than actual thread count
-1..$maxPowershellInstances | ForEach-Object{
-	$ps = [powershell]::Create()
-	$ps.RunspacePool = $processorRunspacePool
-	$powershellPoolForProcessor.add($ps)
-}
-
-
-$DisposerRunspacePool = [runspacefactory]::CreateRunspacePool(1, 1)
-$DisposerRunspacePool.Open()
-$disposerScriptBlock = {
-    param($bag, $q, $sync, $psPool, $throttleSemaphore)
-
-    while (-not $sync.Done -or $bag.Count -gt 0) {
-        $task = $null
-        if ($bag.TryTake([ref]$task)) {
-
-            if ($task.Handle.AsyncWaitHandle.WaitOne(0)) {
-                try {
-                    $r = $task.Ps.EndInvoke($task.Handle)
-                    $q.Enqueue($r.LogString)
-                    # optional: update shared counters here
-                } 
-                catch {
-                    $q.Enqueue("EndInvoke Error: $($_.Exception.Message)")
-                } 
-                finally {
-                    $task.Ps.Dispose()
-                    $task.Ps.Commands.Clear()
-                    $psPool.Add($task.Ps)
-                    $throttleSemaphore.Release()
-                }
-            } 
-            else {
-
-                $bag.Add($task)
-                Start-Sleep -Milliseconds 10
-            }
-        } 
-        else {
-            Start-Sleep -Milliseconds 30
-
-        }
-    }
-}
-$disposerScriptBlockPreCompiled = [scriptblock]::Create($disposerScriptBlock.ToString())
-
-$loggerRunspacePool = [runspacefactory]::CreateRunspacePool(1, 1)
-$loggerRunspacePool.Open()
+# -------------------------- 4. LOGGER SCRIPTBLOCK --------------------
 
 $loggerScriptBlock = {
     param($queue, $file, $sync)
-    "Started logging" | Out-File -FilePath $file
+    "Started logging - $(Get-Date)" | Out-File -FilePath $file
     while (-not $sync.Done -or $queue.Count -gt 0) {
         $msg = $null
         if ($queue.TryDequeue([ref]$msg)) {
             $msg | Out-File -FilePath $file -Append
-        } else {
+        }
+        else {
             Start-Sleep -Milliseconds 10
         }
     }
+    "Stopped logging - $(Get-Date)" | Out-File -FilePath $file -Append
 }
-$loggerScriptBlockPreCompiled = [scriptblock]::Create($loggerScriptBlock.ToString())
 
-
-# -------------------------- 8. PROGRESS BAR -------------------------
-
-#class ProgressBar {
-#    [int] $Total = 0
-#    [int] $Copied = 0
-#    [string] $CurrentFile = ""
-#    [System.Threading.Timer] $Timer
-#
-#    ProgressBar([int]$total) {
-#        $this.Total = $total
-#        $this.Timer = [System.Threading.Timer]::new(
-#            {
-#                param($state)
-#                $p = $state
-#                $pct = if ($p.Total -gt 0) { [math]::Round($p.Copied * 100 / $p.Total, 1) } else { 0 }
-#                $bar = '=' * [int]($pct / 2) + ' ' * (50 - [int]($pct / 2))
-#                $line = "$($p.CurrentFile.PadRight(30).Substring(0, [math]::Min(30, $p.CurrentFile.Length))) | [$bar] $pct% | Copied: $($p.Copied)/$($p.Total)"
-#                Write-Host "`r$line" -NoNewline
-#            },
-#            $this,
-#            [TimeSpan]::FromMilliseconds(100),
-#            [TimeSpan]::FromMilliseconds(100)
-#        )
-#    }
-#
-#    [void] Update([string]$file, [int]$copied) {
-#        $this.CurrentFile = [IO.Path]::GetFileName($file)
-#        $this.Copied = $copied
-#    }
-#
-#    [void] Stop() {
-#        $this.Timer.Dispose()
-#        Write-Host "`nProgress complete."
-#    }
-#}
-
-# -------------------------- 9. MAIN ---------------------------------
+# -------------------------- 5. MAIN ----------------------------------
 
 try {
-    # ---- create log folder ----
+    # Create log folder
     if (-not (Test-Path $scriptLogFileFolder)) {
         New-Item -ItemType Directory -Path $scriptLogFileFolder -Force | Out-Null
     }
 
-    # ---- pre-count total lines for progress bar ----
-    $totalLinesToProcess = 0
-    foreach ($f in $listOfInputFiles) {
-        $p = Join-Path $inputFilesFolder $f
-        $c = (Get-Content $p).Count
-        $lines = if ($numOfFileLinesToProcess -eq -1) { $c } else { [math]::Min($numOfFileLinesToProcess, $c) }
-        $start = [math]::Max(0, $startAtFileLine - 1)
-        $totalLinesToProcess += ($lines - $start)
-    }
-    #$progress = [ProgressBar]::new($totalLinesToProcess)
+    # Setup runspace pools
+    $processorRunspacePool = [runspacefactory]::CreateRunspacePool(1, $maxNumberOfParallelJobs)
+    $processorRunspacePool.Open()
 
-    # ---- session-level variables ----
+    $loggerRunspacePool = [runspacefactory]::CreateRunspacePool(1, 1)
+    $loggerRunspacePool.Open()
+
+    # Create PowerShell instance pool
+    $powershellPool = [System.Collections.Concurrent.ConcurrentBag[powershell]]::new()
+    1..$maxNumberOfParallelJobs | ForEach-Object {
+        $ps = [powershell]::Create()
+        $ps.RunspacePool = $processorRunspacePool
+        $powershellPool.Add($ps)
+    }
+
+    Write-Host "Initialized pool with $maxNumberOfParallelJobs PowerShell instances"
+
+    # Session totals
     $sessionTotalCopied = 0
     $sessionTotalMissing = 0
     $sessionTotalExists = 0
@@ -364,12 +225,18 @@ try {
     $sessionTotalSkipped = 0
     $sessionTotalLong = 0
 
-    foreach ($currInputFile in $listOfInputFiles) {
-    Write-Host ">>>> $($currInputFile)"
+    # Create session log path
+    $sessionLogFileFullPath = "$scriptLogFileFolder\Session_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
 
-        $syncObjProcessorToDisposer.Done = $false
+    foreach ($currInputFile in $listOfInputFiles) {
+        Write-Host "`n>>>> Processing file: $currInputFile"
 
         $accountDocListFilePath = Join-Path $inputFilesFolder $currInputFile
+        if (-not (Test-Path $accountDocListFilePath)) {
+            Write-Host "ERROR: Input file not found: $accountDocListFilePath" -ForegroundColor Red
+            continue
+        }
+
         $fileContent = Get-Content $accountDocListFilePath
 
         $linesToProcess = if ($numOfFileLinesToProcess -eq -1) { $fileContent.Count } else { [math]::Min($numOfFileLinesToProcess, $fileContent.Count) }
@@ -378,46 +245,66 @@ try {
         $firstLine = $fileContent[1] -split '\|'
         $accountID, $accountName = Get-AccountInfo $firstLine
 
-        # Generate log paths
-        $sessionLogFileFullPath, $scriptLogFileFullPath, $extractLogFileFullPath = New-LogPaths $scriptLogFileFolder $accountID $accountName $startIdx
+        $sessionLogPath, $scriptLogPath, $extractLogPath = New-LogPaths $scriptLogFileFolder $accountID $accountName $startIdx
 
-        #start disposer for this account
-        # -------------------------- 6. DISPOSER (zero-CPU) -------------------
-
-        $disposerPs = [powershell]::Create()
-        $disposerPs.RunspacePool = $DisposerRunspacePool
-        $disposerPs.AddScript($disposerScriptBlock).AddArgument($sharedBag).AddArgument($logQueue).AddArgument($syncObjProcessorToDisposer).AddArgument($powershellPoolForProcessor).AddArgument($throttleSemaphore) | Out-Null
-        $disposerHandle = $disposerPs.BeginInvoke()
-
-
-        # start logger for this account
-        # -------------------------- 7. LOGGER (zero-CPU) -------------------
-        $syncObjDisposerToLogger.Done = $false
-        $loggerPs = [powershell]::Create().AddScript($loggerScriptBlock)
-        $loggerPs.RunspacePool = $loggerRunspacePool
-        $loggerPs.AddArgument($logQueue).AddArgument($extractLogFileFullPath).AddArgument($syncObjDisposerToLogger) | Out-Null
-        $loggerHandle = $loggerPs.BeginInvoke()
+        # Start logger for this account
+        $logQueue = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+        $syncLogger = [hashtable]::Synchronized(@{ Done = $false })
         
-        # account-level counters
+        $loggerPs = [powershell]::Create()
+        $loggerPs.RunspacePool = $loggerRunspacePool
+        $loggerPs.AddScript($loggerScriptBlock).AddArgument($logQueue).AddArgument($extractLogPath).AddArgument($syncLogger) | Out-Null
+        $loggerHandle = $loggerPs.BeginInvoke()
+
+        # Account counters
         $totalCopied = 0
         $totalSourceFileMissing = 0
         $totalDestAlreadyExists = 0
         $totalCopyFailed = 0
         $totalInvalidFileLinesSkipped = 0
         $totalSourcePathTooLong = 0
-
         $seenDocIds = @{}
 
-        write-host "# of lines: $($linesToProcess)"
+        # Track active tasks - THIS PREVENTS GC
+        $activeTasks = [System.Collections.Generic.List[Object]]::new()
+
+        Write-Host "Lines to process: $linesToProcess"
 
         for ($i = $startIdx; $i -lt $linesToProcess; $i++) {
-
-            # Progress update every 50 tasks
+            # Progress update
             if (($i + 1) % 1000 -eq 0) { 
-                #$progress.Update($currInputFile, $sessionTotalCopied) 
-                write-host "Processing Line#: $($i+1)"
+                Write-Host "Processing line #$($i+1) - Active tasks: $($activeTasks.Count)"
             }
 
+            # Check for completed tasks
+            for ($j = $activeTasks.Count - 1; $j -ge 0; $j--) {
+                if ($activeTasks[$j].Handle.IsCompleted) {
+                    try {
+                        $result = $activeTasks[$j].PS.EndInvoke($activeTasks[$j].Handle)
+                        
+                        # Log result
+                        $logQueue.Enqueue($result.LogString)
+                        
+                        # Update counters
+                        $totalCopied += $result.FileCopied
+                        $totalSourceFileMissing += $result.SourceFileMissing
+                        $totalDestAlreadyExists += $result.DestAlreadyExists
+                        $totalCopyFailed += $result.CopyFailed
+                    }
+                    catch {
+                        $logQueue.Enqueue("ERROR in EndInvoke: $($_.Exception.Message)")
+                        $totalCopyFailed++
+                    }
+                    finally {
+                        # Return PS instance to pool
+                        $activeTasks[$j].PS.Commands.Clear()
+                        $powershellPool.Add($activeTasks[$j].PS)
+                        $activeTasks.RemoveAt($j)
+                    }
+                }
+            }
+
+            # Parse current line
             $splittedCurrFileLine = $fileContent[$i] -split '\|'
             if ($splittedCurrFileLine[0].Trim('"') -eq 'accountid') {
                 $totalInvalidFileLinesSkipped++
@@ -433,112 +320,154 @@ try {
             $sourceFileFullPath = $sourceFileFullPath.Trim('"')
             $docLinkIDWithoutQuotes = $splittedCurrFileLine[10].Trim('"')
 
-            #$src, $dst = Resolve-Paths $sourceFileFullPath $sourceRootFolder $destinationRootFolder $docLinkIDWithoutQuotes
-            #if (-not $src) {
-            #    $totalInvalidFileLinesSkipped++
-            #    continue
-            #}
-
-
+            # Check for duplicates
             if ($seenDocIds.ContainsKey($docLinkIDWithoutQuotes)) {
                 $totalDestAlreadyExists++
                 continue
             }
             $seenDocIds[$docLinkIDWithoutQuotes] = $true
 
-            if ($src.Length -gt 259) {
+            # Check path length
+            if ($sourceFileFullPath.Length -gt 259) {
                 $totalSourcePathTooLong++
                 continue
             }
 
-            write-host "Before semaphore: # of tasks running: $($sharedBag.Count)"
-
-			#Throttle if needed
-			$throttleSemaphore.Wait() #blocks if no free semaphore
-
-            write-host "After semaphore: # of tasks running: $($sharedBag.Count)"
-			
-            # Submit task
-            #$ps = [powershell]::Create().AddScript($scriptBlockForProcessingThread)
-            #$ps.RunspacePool = $processorRunspacePool
-            $ps = Get-PooledPowershellInstance -psPool $powershellPoolForProcessor
-            $ps.AddScript($processingThreadScriptBlockPrecompiled).AddArgument($i + 1).AddArgument($i + 1).AddArgument($docLinkIDWithoutQuotes).AddArgument($sourceRootFolder).AddArgument($destinationRootFolder).AddArgument($sourceFileFullPath).AddArgument($onlyVerifyDestinationFile).AddArgument($overwriteIfDestinationExists) | Out-Null
-            $handle = $ps.BeginInvoke()
-
-            $taskObj = @{
-                Ps = $ps
-                Handle = $handle
-                TaskID = "$($i + 1)-$($currInputFile)"
-                FileLineNum = $i + 1
-                DocID = $docLinkIDWithoutQuotes
-                SourceFileFullPath = $src
-                DestinationFileFullPath = $dst
+            # Wait if all PS instances are busy
+            while ($activeTasks.Count -ge $maxNumberOfParallelJobs) {
+                Start-Sleep -Milliseconds 10
+                
+                # Check for completed tasks
+                for ($j = $activeTasks.Count - 1; $j -ge 0; $j--) {
+                    if ($activeTasks[$j].Handle.IsCompleted) {
+                        try {
+                            $result = $activeTasks[$j].PS.EndInvoke($activeTasks[$j].Handle)
+                            $logQueue.Enqueue($result.LogString)
+                            $totalCopied += $result.FileCopied
+                            $totalSourceFileMissing += $result.SourceFileMissing
+                            $totalDestAlreadyExists += $result.DestAlreadyExists
+                            $totalCopyFailed += $result.CopyFailed
+                        }
+                        catch {
+                            $logQueue.Enqueue("ERROR in EndInvoke: $($_.Exception.Message)")
+                            $totalCopyFailed++
+                        }
+                        finally {
+                            $activeTasks[$j].PS.Commands.Clear()
+                            $powershellPool.Add($activeTasks[$j].PS)
+                            $activeTasks.RemoveAt($j)
+                        }
+                    }
+                }
             }
 
-            $sharedBag.Add($taskObj)
+            # Get PS instance from pool
+            $ps = $null
+            while (-not $powershellPool.TryTake([ref]$ps)) {
+                Start-Sleep -Milliseconds 5
+            }
 
-            write-host "# of tasks running: $($sharedBag.Count)"
+            # Start new task
+            $ps.AddScript($processingScriptBlock)`
+                .AddArgument($i + 1)`
+                .AddArgument($i + 1)`
+                .AddArgument($docLinkIDWithoutQuotes)`
+                .AddArgument($sourceRootFolder)`
+                .AddArgument($destinationRootFolder)`
+                .AddArgument($sourceFileFullPath)`
+                .AddArgument($onlyVerifyDestinationFile)`
+                .AddArgument($overwriteIfDestinationExists) | Out-Null
 
-            # Throttle if needed
-            #while ($sharedBag.Count -ge $maxNumberOfParallelJobs) { 
-            #    Start-Sleep -Milliseconds 10; 
-            #    #write-host "Waiting for some tasks to finish: $($sharedBag.Count)" 
-            #}
-
-            #write-host "# of tasks running: $($sharedBag.Count)"
- 
+            $task = [PSCustomObject]@{
+                PS = $ps
+                Handle = $ps.BeginInvoke()
+            }
+            $activeTasks.Add($task)
         }
 
-        write-host "finished all lines in file. # of tasks running: $($sharedBag.Count)"
+        # Wait for all remaining tasks to complete
+        Write-Host "Waiting for remaining $($activeTasks.Count) tasks to complete..."
+        while ($activeTasks.Count -gt 0) {
+            for ($j = $activeTasks.Count - 1; $j -ge 0; $j--) {
+                if ($activeTasks[$j].Handle.IsCompleted) {
+                    try {
+                        $result = $activeTasks[$j].PS.EndInvoke($activeTasks[$j].Handle)
+                        $logQueue.Enqueue($result.LogString)
+                        $totalCopied += $result.FileCopied
+                        $totalSourceFileMissing += $result.SourceFileMissing
+                        $totalDestAlreadyExists += $result.DestAlreadyExists
+                        $totalCopyFailed += $result.CopyFailed
+                    }
+                    catch {
+                        $logQueue.Enqueue("ERROR in EndInvoke: $($_.Exception.Message)")
+                        $totalCopyFailed++
+                    }
+                    finally {
+                        $activeTasks[$j].PS.Commands.Clear()
+                        $powershellPool.Add($activeTasks[$j].PS)
+                        $activeTasks.RemoveAt($j)
+                    }
+                }
+            }
+            if ($activeTasks.Count -gt 0) {
+                Start-Sleep -Milliseconds 10
+            }
+        }
 
-        # Signal disposer to finish
-        $syncObjProcessorToDisposer.Done = $true
-        $null = $disposerPs.EndInvoke($disposerHandle); 
-	    $disposerPs.Dispose()
+        # Stop logger
+        $syncLogger.Done = $true
+        $null = $loggerPs.EndInvoke($loggerHandle)
+        $loggerPs.Dispose()
 
-        write-host "disposed disposer. # of tasks running: $($sharedBag.Count)"
-
-        $syncObjDisposerToLogger.Done = $true
-        $null = $loggerPs.EndInvoke($loggerHandle); 
-		$loggerPs.Dispose()
-
-        write-host "disposed logger. # of tasks running: $($sharedBag.Count)"
-
-        # Final progress update
-        #$progress.Update($currInputFile, $sessionTotalCopied)
-
-        # Session summary
-        $acctMsg = "Totals:: LinesInFile: $numOfFileLinesToProcess : Invalid file lines skipped: $totalInvalidFileLinesSkipped : Total files processed: $($totalCopied + $totalSourceFileMissing + $totalDestAlreadyExists + $totalSourcePathTooLong) : TotalCopied: $totalCopied : TotalSourceFileMissing: $totalSourceFileMissing : TotalDestAlreadyExists: $totalDestAlreadyExists : TotalSourcePathTooLong: $totalSourcePathTooLong : TotalCopyFailed: $totalCopyFailed"
-        $acctMsg | Out-File $scriptLogFileFullPath -Append
+        # Account summary
+        $acctMsg = "Account: $accountName ($accountID) | Invalid lines skipped: $totalInvalidFileLinesSkipped | Files processed: $($totalCopied + $totalSourceFileMissing + $totalDestAlreadyExists + $totalSourcePathTooLong) | Copied: $totalCopied | Missing: $totalSourceFileMissing | Already exists: $totalDestAlreadyExists | Path too long: $totalSourcePathTooLong | Failed: $totalCopyFailed"
+        $acctMsg | Out-File $scriptLogPath -Append
         $acctMsg | Out-File $sessionLogFileFullPath -Append
+        Write-Host $acctMsg
 
-        # Accumulate session totals
+        # Update session totals
         $sessionTotalCopied += $totalCopied
         $sessionTotalMissing += $totalSourceFileMissing
         $sessionTotalExists += $totalDestAlreadyExists
         $sessionTotalFailed += $totalCopyFailed
         $sessionTotalSkipped += $totalInvalidFileLinesSkipped
         $sessionTotalLong += $totalSourcePathTooLong
-
-        write-host "..... going to next file. # of tasks running: $($sharedBag.Count)"
     }
 
-    #$progress.Stop()
-    $final = "Session Totals:: Invalid file lines skipped: $sessionTotalInvalidFileLinesSkipped : Total files processed: $($sessionTotalCopied + $sessionTotalSourceFileMissing + $sessionTotalDestAlreadyExists + $sessionTotalSourcePathTooLong) : TotalCopied: $sessionTotalCopied : TotalSourceFileMissing: $sessionTotalSourceFileMissing : TotalDestAlreadyExists: $sessionTotalDestAlreadyExists : TotalSourcePathTooLong: $sessionTotalSourcePathTooLong  : TotalCopyFailed: $sessionTotalFailed"
+    # Final session summary
+    $final = "`nSESSION TOTALS | Files processed: $($sessionTotalCopied + $sessionTotalMissing + $sessionTotalExists + $sessionTotalLong) | Copied: $sessionTotalCopied | Missing: $sessionTotalMissing | Already exists: $sessionTotalExists | Path too long: $sessionTotalLong | Failed: $sessionTotalFailed | Invalid lines skipped: $sessionTotalSkipped"
     $final | Out-File $sessionLogFileFullPath -Append
-    Write-Host $final
+    Write-Host $final -ForegroundColor Green
 }
 catch {
-    Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
-    $_.Exception | Format-List * -Force | Out-String | Out-File "$scriptLogFileFolder\Error_$(Get-Date -Format yyyyMMdd_HHmmss).txt"
+    Write-Host "`nFATAL ERROR: $($_.Exception.Message)" -ForegroundColor Red
+    $_.Exception | Format-List * -Force | Out-String | Out-File "$scriptLogFileFolder\FatalError_$(Get-Date -Format yyyyMMdd_HHmmss).txt"
+    throw
 }
 finally {
-    # ---- cleanup ----
-    if ($disposerPs) { $disposerPs.Dispose() }
-    if ($loggerPs) { $loggerPs.Dispose() }
-    if ($processorRunspacePool) { $processorRunspacePool.Close(); $processorRunspacePool.Dispose() }
-    if ($loggerRunspacePool) { $loggerRunspacePool.Close(); $loggerRunspacePool.Dispose() }
+    Write-Host "`nCleaning up resources..."
     
-    "Cleanup complete – $(Get-Date)" | Out-File $sessionLogFileFullPath -Append
+    # Dispose all pooled PowerShell instances
+    if ($powershellPool) {
+        $powershellPool | ForEach-Object { 
+            if ($_) { 
+                try { $_.Dispose() } catch { }
+            }
+        }
+        Write-Host "Disposed $($powershellPool.Count) PowerShell instances"
+    }
+    
+    # Close runspace pools
+    if ($processorRunspacePool) { 
+        $processorRunspacePool.Close()
+        $processorRunspacePool.Dispose()
+        Write-Host "Closed processor runspace pool"
+    }
+    if ($loggerRunspacePool) { 
+        $loggerRunspacePool.Close()
+        $loggerRunspacePool.Dispose()
+        Write-Host "Closed logger runspace pool"
+    }
+    
+    Write-Host "Cleanup complete - $(Get-Date)" -ForegroundColor Cyan
 }
-
