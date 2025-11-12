@@ -1,17 +1,3 @@
-<#=====================================================================
- Parallel File-Copy Engine – PowerShell 5.1
-=====================================================================#>
-
-# -------------------------- 1. CONFIGURATION --------------------------
-$maxNumberOfParallelJobs = 3 # * [Environment]::ProcessorCount # I/O bound → 2× cores is usually best
-$onlyVerifyDestinationFile = $false
-$overwriteIfDestinationExists = $false
-
-$inputFilesFolder = "some path"
-$sourceRootFolder = "some path"
-$destinationRootFolder = "some path"
-$scriptLogFileFolder = "some path"
-
 $startAtFileLine = 1
 $numOfFileLinesToProcess = -1 # -1 = whole file
 
@@ -67,164 +53,129 @@ function Get-PooledPowershellInstance {
 
 # -------------------------- 3. PROCESSING SCRIPTBLOCK ----------------
 
-$callbackFunction = [System.Threading.WaitCallback]{
-	param($args)
-    #param($taskID, $fileLineNum, $docLinkIDWithoutQuotes, $sourceFileFullPath, $destinationFileFullPath, $onlyVerifyDestinationFile, $overwriteIfDestinationExists, $logQueue)
+$scriptBlockForProcessingThread = {
+    param(
+        $taskID,
+        $fileLineNum,
+        $docLinkIDWithoutQuotes,
+		$sourceRootFolder,
+		$destinationRootFolder,
+        $sourceFileFullPath,
+        $onlyVerifyDestinationFile,
+        $overwriteIfDestinationExists
+    )
+
+    $fileCopied = 0; $sourceFileMissing = 0; $destAlreadyExists = 0; $copyFailed = 0
+    $logString = ""
 	
-	$taskID = $args[0]
-	$fileLineNum = $args[1]
-	$docLinkIDWithoutQuotes = $args[2]
-	$sourceFileFullPath = $args[3]
-	$destinationFileFullPath = $args[4]
-	$onlyVerifyDestinationFile = $args[5]
-	$overwriteIfDestinationExists = $args[6]
-	$logQueue = $args[7]
+	$sourcePath = .substring(0, $sourceFileFullPath.LastIndexOf('\'))
 
-    try {
+	$sourceFileName = $sourceFileFullPath.substring($sourceFileFullPath.LastIndexOf('\')+1)
 
-        $fileCopied = 0
-    
-        $sourceFileMissing = 0
-    
-        $destAlreadyExists = 0
+	if($sourceFileName.LastIndexOf('.') -ge 0) {
 
-        $copyFailed = 0
-
-        $logString = ""
-
-        $sourcePath = $sourceFileFullPath.substring(0, $sourceFileFullPath.LastIndexOf('\'))
-
-        $sourceFileName = $sourceFileFullPath.substring($sourceFileFullPath.LastIndexOf('\')+1)
-
-        if($sourceFileName.LastIndexOf('.') -ge 0) {
-
-            $fileExtension = $sourceFileName.Substring($sourceFileName.LastIndexOf('.'))
-        }
-        else {
-
-            $fileExtension = ''
-        }
-
-        $destinationFolderPath = $destinationFileFullPath.substring(0, $destinationFileFullPath.LastIndexOf('\'))
-
-        $destinationFileFullPath = "$destinationFolderPath\$docLinkIDWithoutQuotes$fileExtension"
-
-	    if ( (!(Test-Path -literalpath $sourceFileFullPath)) -and (!(Test-Path -path $sourceFileFullPath))) {
-		
-		    $sourceFileMissing = 1
-
-		    $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : SourceFileMissing: $sourceFileFullPath"
-
-	    }
-	    else {
-				
-		    if (!($onlyVerifyDestinationFile)) {
-			
-			    if (!(Test-Path -path $destinationFileFullPath) -or ($overwriteIfDestinationExists)) {
-			
-				    if ( !(Test-Path -path "$destinationFolderPath") ) {
-					
-					    New-Item -type Directory -path "$destinationFolderPath" | out-null
-
-				    };				
-			
-				    try{
-					    #Attempt copying source with literal path to cope with '[' path which powershell uses as a keyword
-					    copy-item -literalPath "$sourceFileFullPath" -Destination "$destinationFileFullPath"
-				    }
-				    catch{
-				    }
-				
-				    if (!(Test-Path -path $destinationFileFullPath)) {
-					
-					    try{
-						    #if copy did not happen then try copying again without literal path to account for some other special character scenarios like '?'
-						    copy-item -Path "$sourceFileFullPath" -Destination "$destinationFileFullPath"
-					    }
-					    catch{
-					    }
-				
-				    }
-
-		            #final check if the copy succeeded or not
-		            if ((Test-Path -path $destinationFileFullPath)) {
-
-			            $fileCopied = 1
-
-			            $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : Copied: $destinationFileFullPath"
-		
-		            }
-		            else {
-		
-			            $copyFailed = 1
-	
-			            $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : CopyFailed: $sourceFileFullPath : IntendedDestination : $destinationFileFullPath" 
-
-		            }
-
-			    }
-                else {
-
-                    $destAlreadyExists = 1
-
-			        $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : DestAlreadyExists: $destinationFileFullPath"
-            
-                }
-		
-            }
-            else {
-
-		        #final check if the copy succeeded or not
-		        if ((Test-Path -path $destinationFileFullPath)) {
-
-                    $destAlreadyExists = 1
-
-			        $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : DestAlreadyExists: $destinationFileFullPath"
-		
-		        }
-		        else {
-		
-			        $copyFailed = 1
-	
-			        $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : CopyFailed: $sourceFileFullPath : IntendedDestination : $destinationFileFullPath" 
-
-		        }
-
-            }
-
-	    }
-    }
-    catch {
-		$copyFailed = 1
-
-		$logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : CopyFailed: $sourceFileFullPath : IntendedDestination : $destinationFileFullPath" 
-
-    }
-	finally{
-	
-		$logQueue.Enqueue($logString)
-		
-		$throttleSemaphore.Release()
-	
+		$fileExtension = $sourceFileName.Substring($sourceFileName.LastIndexOf('.'))
 	}
-}
+	else {
 
-$callbackFunction2 = [System.Threading.WaitCallback]{
+		$fileExtension = ''
+	}
+
+	$destinationFileFullPath = $sourceFileFullPath -replace ([regex]::Escape($sourceRootFolder)), $destinationRootFolder
 	
-	param($args)
-    #param($taskID, $fileLineNum, $docLinkIDWithoutQuotes, $sourceFileFullPath, $destinationFileFullPath, $onlyVerifyDestinationFile, $overwriteIfDestinationExists, $logQueue)
+	$destinationFolderPath = $destinationFileFullPath.substring(0, $destinationFileFullPath.LastIndexOf('\'))
+
+	$destinationFileFullPath = "$destinationFolderPath\$docLinkIDWithoutQuotes$fileExtension"
+
+    # ---- valid destination? ----
+    if ($destinationFileFullPath -eq $sourceFileFullPath) {
+        $copyFailed = 1
+        $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : InvalidDestinationPath: $destinationFileFullPath"
+        return @{
+            TaskID = $taskID; DocID = $docLinkIDWithoutQuotes; SourceFileFullPath = $sourceFileFullPath
+            DestinationFileFullPath = $destinationFileFullPath; FileCopied = $fileCopied
+            SourceFileMissing = $sourceFileMissing; DestAlreadyExists = $destAlreadyExists; CopyFailed = $copyFailed
+            LogString = "$(get-date -format "ddMMyyyy_HHmmss.ffff") : $($logString)"
+        }
+    }
 	
-	$taskID = $args[0]
-	$fileLineNum = $args[1]
-	$docLinkIDWithoutQuotes = $args[2]
-	$sourceFileFullPath = $args[3]
-	$destinationFileFullPath = $args[4]
-	$onlyVerifyDestinationFile = $args[5]
-	$overwriteIfDestinationExists = $args[6]
-	$logQueue = $args[7]
-	
-	#$logQueue.Enqueue("Msg from outer space: $($taskID)")
+    # ---- source exists? ----
+    if ((!(Test-Path -LiteralPath $sourceFileFullPath)) -and (!(Test-Path -Path $sourceFileFullPath))) {
+        $sourceFileMissing = 1
+        $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : SourceFileMissing: $sourceFileFullPath"
+        return @{
+            TaskID = $taskID; DocID = $docLinkIDWithoutQuotes; SourceFileFullPath = $sourceFileFullPath
+            DestinationFileFullPath = $destinationFileFullPath; FileCopied = $fileCopied
+            SourceFileMissing = $sourceFileMissing; DestAlreadyExists = $destAlreadyExists; CopyFailed = $copyFailed
+            LogString = "$(get-date -format "ddMMyyyy_HHmmss.ffff") : $($logString)"
+        }
+    }
+
+    # ---- create destination folder ----
+    $destDir = [IO.Path]::GetDirectoryName($destinationFileFullPath)
+    if (-not (Test-Path -LiteralPath $destDir)) {
+        try {
+            [IO.Directory]::CreateDirectory($destDir) | Out-Null
+        } catch {
+            $copyFailed = 1
+            $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : CreateDirFailed: $destDir"
+            return @{
+                TaskID = $taskID; DocID = $docLinkIDWithoutQuotes; SourceFileFullPath = $sourceFileFullPath
+                DestinationFileFullPath = $destinationFileFullPath; FileCopied = $fileCopied
+                SourceFileMissing = $sourceFileMissing; DestAlreadyExists = $destAlreadyExists; CopyFailed = $copyFailed
+                LogString = "$(get-date -format "ddMMyyyy_HHmmss.ffff") : $($logString)"
+            }
+        }
+    }
+
+    # ---- verify-only mode ----
+    if ($onlyVerifyDestinationFile) {
+        if (Test-Path -LiteralPath $destinationFileFullPath) {
+            $destAlreadyExists = 1
+            $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : DestAlreadyExists: $destinationFileFullPath"
+        } else {
+            $copyFailed = 1
+            $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : CopyFailed: $sourceFileFullPath : IntendedDestination : $destinationFileFullPath" 
+        }
+        return @{
+            TaskID = $taskID; DocID = $docLinkIDWithoutQuotes; SourceFileFullPath = $sourceFileFullPath
+            DestinationFileFullPath = $destinationFileFullPath; FileCopied = $fileCopied
+            SourceFileMissing = $sourceFileMissing; DestAlreadyExists = $destAlreadyExists; CopyFailed = $copyFailed
+            LogString = "$(get-date -format "ddMMyyyy_HHmmss.ffff") : $($logString)"
+        }
+    }
+
+    # ---- overwrite logic ----
+    $destExists = Test-Path -LiteralPath $destinationFileFullPath
+    if ($destExists -and -not $overwriteIfDestinationExists) {
+        $destAlreadyExists = 1
+        $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : DestAlreadyExists: $destinationFileFullPath"
+        return @{
+            TaskID = $taskID; DocID = $docLinkIDWithoutQuotes; SourceFileFullPath = $sourceFileFullPath
+            DestinationFileFullPath = $destinationFileFullPath; FileCopied = $fileCopied
+            SourceFileMissing = $sourceFileMissing; DestAlreadyExists = $destAlreadyExists; CopyFailed = $copyFailed
+            LogString = "$(get-date -format "ddMMyyyy_HHmmss.ffff") : $($logString)"
+        }
+    }
+
+    # ---- COPY (rename) ----
+    try {
+        [IO.File]::Copy($sourceFileFullPath, $destinationFileFullPath, $true) # $true = overwrite
+        $fileCopied = 1
+        $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : Copied: $destinationFileFullPath"
+    } catch {
+        $copyFailed = 1
+        $logString = "Fileline#: $fileLineNum : Task: $taskID : DocID: $docLinkIDWithoutQuotes : CopyFailed: $sourceFileFullPath : IntendedDestination : $destinationFileFullPath : $($_.Exception.Message)"
+    }
+
+    return @{
+        TaskID = $taskID; DocID = $docLinkIDWithoutQuotes; SourceFileFullPath = $sourceFileFullPath
+        DestinationFileFullPath = $destinationFileFullPath; FileCopied = $fileCopied
+        SourceFileMissing = $sourceFileMissing; DestAlreadyExists = $destAlreadyExists; CopyFailed = $copyFailed
+        LogString = "$(get-date -format "ddMMyyyy_HHmmss.ffff") : $($logString)"
+    }
 }
+$processingThreadScriptBlockPrecompiled = [scriptblock]::Create($scriptBlockForProcessingThread.ToString())
 
 # -------------------------- 4. TASK OBJECT ---------------------------
 
@@ -275,7 +226,7 @@ $maxPowershellInstances = $maxNumberOfParallelJobs * 2 #a bit more than actual t
 1..$maxPowershellInstances | ForEach-Object{
 	$ps = [powershell]::Create()
 	$ps.RunspacePool = $processorRunspacePool
-	$powershellPoolForProcessor.add($ps) | out-null
+	$powershellPoolForProcessor.add($ps)
 }
 
 
@@ -336,6 +287,42 @@ $loggerScriptBlock = {
 $loggerScriptBlockPreCompiled = [scriptblock]::Create($loggerScriptBlock.ToString())
 
 
+# -------------------------- 8. PROGRESS BAR -------------------------
+
+#class ProgressBar {
+#    [int] $Total = 0
+#    [int] $Copied = 0
+#    [string] $CurrentFile = ""
+#    [System.Threading.Timer] $Timer
+#
+#    ProgressBar([int]$total) {
+#        $this.Total = $total
+#        $this.Timer = [System.Threading.Timer]::new(
+#            {
+#                param($state)
+#                $p = $state
+#                $pct = if ($p.Total -gt 0) { [math]::Round($p.Copied * 100 / $p.Total, 1) } else { 0 }
+#                $bar = '=' * [int]($pct / 2) + ' ' * (50 - [int]($pct / 2))
+#                $line = "$($p.CurrentFile.PadRight(30).Substring(0, [math]::Min(30, $p.CurrentFile.Length))) | [$bar] $pct% | Copied: $($p.Copied)/$($p.Total)"
+#                Write-Host "`r$line" -NoNewline
+#            },
+#            $this,
+#            [TimeSpan]::FromMilliseconds(100),
+#            [TimeSpan]::FromMilliseconds(100)
+#        )
+#    }
+#
+#    [void] Update([string]$file, [int]$copied) {
+#        $this.CurrentFile = [IO.Path]::GetFileName($file)
+#        $this.Copied = $copied
+#    }
+#
+#    [void] Stop() {
+#        $this.Timer.Dispose()
+#        Write-Host "`nProgress complete."
+#    }
+#}
+
 # -------------------------- 9. MAIN ---------------------------------
 
 try {
@@ -383,10 +370,10 @@ try {
         #start disposer for this account
         # -------------------------- 6. DISPOSER (zero-CPU) -------------------
 
-        #$disposerPs = [powershell]::Create()
-        #$disposerPs.RunspacePool = $DisposerRunspacePool
-        #$disposerPs.AddScript($disposerScriptBlock).AddArgument($sharedBag).AddArgument($logQueue).AddArgument($syncObjProcessorToDisposer).AddArgument($powershellPoolForProcessor).AddArgument($throttleSemaphore) | Out-Null
-        #$disposerHandle = $disposerPs.BeginInvoke()
+        $disposerPs = [powershell]::Create()
+        $disposerPs.RunspacePool = $DisposerRunspacePool
+        $disposerPs.AddScript($disposerScriptBlock).AddArgument($sharedBag).AddArgument($logQueue).AddArgument($syncObjProcessorToDisposer).AddArgument($powershellPoolForProcessor).AddArgument($throttleSemaphore) | Out-Null
+        $disposerHandle = $disposerPs.BeginInvoke()
 
 
         # start logger for this account
@@ -457,13 +444,24 @@ try {
 
             write-host "After semaphore: # of tasks running: $($sharedBag.Count)"
 			
-			$argsArray = @($($i+1), $($i+1), $docLinkIDWithoutQuotes, $sourceRootFolder, $destinationRootFolder, $sourceFileFullPath, $onlyVerifyDestinationFile, $overwriteIfDestinationExists, $logQueue)
+            # Submit task
+            #$ps = [powershell]::Create().AddScript($scriptBlockForProcessingThread)
+            #$ps.RunspacePool = $processorRunspacePool
+            $ps = Get-PooledPowershellInstance -psPool $powershellPoolForProcessor
+            $ps.AddScript($processingThreadScriptBlockPrecompiled).AddArgument($i + 1).AddArgument($i + 1).AddArgument($docLinkIDWithoutQuotes).AddArgument($sourceRootFolder).AddArgument($destinationRootFolder).AddArgument($sourceFileFullPath).AddArgument($onlyVerifyDestinationFile).AddArgument($overwriteIfDestinationExists) | Out-Null
+            $handle = $ps.BeginInvoke()
 
-			#[System.Threading.ThreadPool]::QueueUserWorkItem($callbackFunction, $argsArray) 
-            [System.Threading.ThreadPool]::QueueUserWorkItem($callbackFunction2, $argsArray)
-            $throttleSemaphore.Release()
+            $taskObj = @{
+                Ps = $ps
+                Handle = $handle
+                TaskID = "$($i + 1)-$($currInputFile)"
+                FileLineNum = $i + 1
+                DocID = $docLinkIDWithoutQuotes
+                SourceFileFullPath = $src
+                DestinationFileFullPath = $dst
+            }
 
-            #$sharedBag.Add($taskObj)
+            $sharedBag.Add($taskObj)
 
             write-host "# of tasks running: $($sharedBag.Count)"
 
@@ -480,11 +478,11 @@ try {
         write-host "finished all lines in file. # of tasks running: $($sharedBag.Count)"
 
         # Signal disposer to finish
-        #$syncObjProcessorToDisposer.Done = $true
-        #$null = $disposerPs.EndInvoke($disposerHandle); 
-	    #$disposerPs.Dispose()
+        $syncObjProcessorToDisposer.Done = $true
+        $null = $disposerPs.EndInvoke($disposerHandle); 
+	    $disposerPs.Dispose()
 
-        #write-host "disposed disposer. # of tasks running: $($sharedBag.Count)"
+        write-host "disposed disposer. # of tasks running: $($sharedBag.Count)"
 
         $syncObjDisposerToLogger.Done = $true
         $null = $loggerPs.EndInvoke($loggerHandle); 
@@ -522,7 +520,7 @@ catch {
 }
 finally {
     # ---- cleanup ----
-    #if ($disposerPs) { $disposerPs.Dispose() }
+    if ($disposerPs) { $disposerPs.Dispose() }
     if ($loggerPs) { $loggerPs.Dispose() }
     if ($processorRunspacePool) { $processorRunspacePool.Close(); $processorRunspacePool.Dispose() }
     if ($loggerRunspacePool) { $loggerRunspacePool.Close(); $loggerRunspacePool.Dispose() }
